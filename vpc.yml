@@ -1,0 +1,891 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create a VPC with Private, Public, and DB subnets spread out over 1-3 AZs optionally.
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: The name of the environment that is being launched (Sandobx, Dev, etc.)
+    Default: dev
+  VpcName:
+    Type: String
+    Description: The name of the VPC (name will be ${EnvironmentName}-${VpcName})
+    Default: my-cool-vpc
+  VpcCidr:
+    Type: String
+    Description: The CIDR range for the VPC.
+    Default: 10.1.0.0/16
+  UseVpcFlowLogs:
+    Type: String
+    Description: True is VPC flow logs should be enabled and a role created for it.
+    Default: false
+    AllowedValues:
+      - true
+      - false
+  VpcFlowLogsGroupName:
+    Type: String
+    Description: The name of a new or existing CloudWatch Logs log group where Amazon EC2 publishes your flow logs.
+    Default: 'vpc-flow-logs'
+  PublicSubnet1Cidr:
+    Type: String
+    Description: The CIDR for Public Subnet 1
+    Default: 10.1.0.0/24
+  PrivateSubnet1Cidr:
+    Type: String
+    Description: The CIDR for Private Subnet 1
+    Default: 10.1.1.0/24
+  PublicSubnet2Cidr:
+    Type: String
+    Description: The CIDR for Public Subnet 2
+    Default: 10.1.2.0/24
+  PrivateSubnet2Cidr:
+    Type: String
+    Description: The CIDR for Private Subnet 2
+    Default: 10.1.3.0/24
+  PublicSubnet3Cidr:
+    Type: String
+    Description: The CIDR for Public Subnet 3
+    Default: ''
+  PrivateSubnet3Cidr:
+    Type: String
+    Description: The CIDR for Private Subnet 3
+    Default: ''
+  MapPublicSubnetsOnLaunch:
+    Type: String
+    Description: True if you want instances launched within the Public subnets to have a Public IP by default.
+    Default: true
+  NATType:
+    Type: String
+    Description: The type of NAT instances to be launched with the VPC.
+    Default: 'NAT Gateway'
+    AllowedValues:
+      - 'NAT Gateway'
+      - 'NAT Instances' # TODO: Implement the instances.
+      - 'None (Internet Gateway)'
+  S3VpcEndPointType:
+    Type: String
+    Description: Should a VPC endpoint for S3 be created?
+    Default: false
+    AllowedValues:
+      - true
+      - false
+Mappings:
+  AWSAMIRegionMap:
+    AMI:
+      AWSNATHVM: amzn-ami-vpc-nat-hvm-2017.03.0.20170401-x86_64-ebs
+    us-gov-west-1:
+      AWSNATHVM: ami-3f0a8f5e
+Conditions:
+  CreateVPCFlowLogs:
+    Fn::Equals:
+      - Ref: UseVpcFlowLogs
+      - 'true'
+  CreateS3VpcEndpoint:
+    Fn::Equals:
+      - Ref: S3VpcEndPointType
+      - 'true'
+  CreatePublicRouteTable:
+    Fn::Or:
+      - Condition: CreatePublicSubnet1
+      - Condition: CreatePublicSubnet2
+      - Condition: CreatePublicSubnet3
+  CreatePublicSubnet1:
+    Fn::Not:
+      - Fn::Equals:
+        - Ref: PublicSubnet1Cidr
+        - ''
+  CreatePrivateSubnet1:
+    Fn::Not:
+      - Fn::Equals:
+        - Ref: PrivateSubnet1Cidr
+        - ''
+  CreatePublicSubnet2:
+    Fn::Not:
+      - Fn::Equals:
+        - Ref: PublicSubnet2Cidr
+        - ''
+  CreatePrivateSubnet2:
+    Fn::Not:
+      - Fn::Equals:
+        - Ref: PrivateSubnet2Cidr
+        - ''
+  CreatePublicSubnet3:
+    Fn::Not:
+      - Fn::Equals:
+        - Ref: PublicSubnet3Cidr
+        - ''
+  CreatePrivateSubnet3:
+    Fn::Not:
+      - Fn::Equals:
+        - Ref: PrivateSubnet3Cidr
+        - ''
+  CreateNatGateways:
+    Fn::Equals:
+      - Ref: CreateNATGWs
+      - 'true'
+  CreateNatGateways:
+    Fn::Equals:
+      - Ref: NATType
+      - 'NAT Gateway'
+  CreateNatInstances:
+    Fn::Equals:
+      - Ref: NATType
+      - 'NAT Instances'
+  UseIGWForNat:
+    Fn::Equals:
+      - Ref: NATType
+      - 'None (Internet Gateway)'
+  CreatePrivateNGW1:
+    Fn::And:
+      - Condition: CreatePublicSubnet1
+      - Condition: CreatePrivateSubnet1
+      - Condition: CreateNatGateways
+  CreatePrivateNGW2:
+    Fn::And:
+      - Condition: CreatePublicSubnet2
+      - Condition: CreatePrivateSubnet2
+      - Condition: CreateNatGateways
+  CreatePrivateNGW3:
+    Fn::And:
+      - Condition: CreatePublicSubnet3
+      - Condition: CreatePrivateSubnet3
+      - Condition: CreateNatGateways
+  CreatePrivateNATInstance1:
+    Fn::And:
+      - Condition: CreatePublicSubnet1
+      - Condition: CreatePrivateSubnet1
+      - Condition: CreateNatInstances
+  CreatePrivateNATInstance2:
+    Fn::And:
+      - Condition: CreatePublicSubnet2
+      - Condition: CreatePrivateSubnet2
+      - Condition: CreateNatInstances
+  CreatePrivateNATInstance3:
+    Fn::And:
+      - Condition: CreatePublicSubnet3
+      - Condition: CreatePrivateSubnet3
+      - Condition: CreateNatInstances
+  AssociatePrivateWithIGW1:
+    Fn::And:
+      - Condition: CreatePrivateSubnet1
+      - Condition: UseIGWForNat
+  AssociatePrivateWithIGW2:
+    Fn::And:
+      - Condition: CreatePrivateSubnet2
+      - Condition: UseIGWForNat
+  AssociatePrivateWithIGW3:
+    Fn::And:
+      - Condition: CreatePrivateSubnet3
+      - Condition: UseIGWForNat
+  OnePublicSubnets:
+    Fn::And:
+      - Condition: CreatePublicSubnet1
+      - Fn::Not:
+        - Condition: CreatePublicSubnet2
+      - Fn::Not:
+        - Condition: CreatePublicSubnet3
+  TwoPublicSubnets:
+    Fn::And:
+      - Condition: CreatePublicSubnet1
+      - Condition: CreatePublicSubnet2
+      - Fn::Not:
+        - Condition: CreatePublicSubnet3
+  ThreePublicSubnets:
+    Fn::And:
+      - Condition: CreatePrivateSubnet1
+      - Condition: CreatePrivateSubnet2
+      - Condition: CreatePrivateSubnet3
+  OnePrivateSubnets:
+    Fn::And:
+      - Condition: CreatePrivateSubnet1
+      - Fn::Not:
+        - Condition: CreatePrivateSubnet2
+      - Fn::Not:
+        - Condition: CreatePrivateSubnet3
+  TwoPrivateSubnets:
+    Fn::And:
+      - Condition: CreatePrivateSubnet1
+      - Condition: CreatePrivateSubnet2
+      - Fn::Not:
+        - Condition: CreatePrivateSubnet3
+  ThreePrivateSubnets:
+    Fn::And:
+      - Condition: CreatePrivateSubnet1
+      - Condition: CreatePrivateSubnet2
+      - Condition: CreatePrivateSubnet3
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock:
+        Ref: VpcCidr
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - '-'
+              - - Ref: EnvironmentName
+                - Ref: VpcName
+  VpcFlowLogs:
+    Condition: CreateVPCFlowLogs
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn:
+        Ref: FlowLogsRole
+      LogGroupName:
+        Ref: VpcFlowLogsGroupName
+      ResourceId:
+        Ref: Vpc
+      ResourceType: VPC
+      TrafficType: ALL
+  FlowLogsRole:
+    Condition: CreateVPCFlowLogs
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: vpc-flow-logs.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - Ref: FlowLogsPolicy
+      RoleName: 'flow-logs-role'
+  FlowLogsPolicy:
+    Condition: CreateVPCFlowLogs
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: 'VPC Flow Logs Managed Policy'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Resource: '*'
+          Action:
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:DescribeLogGroups
+          - logs:DescribeLogStreams
+          - logs:PutLogEvent
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - '-'
+              - - Ref: EnvironmentName
+                - Ref: VpcName
+                - 'IGW'
+  InternetGatewayAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId:
+        Ref: InternetGateway
+      VpcId:
+        Ref: Vpc
+  S3VpcEndpoint:
+    Condition: CreateS3VpcEndpoint
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: '*'
+            Resource: '*'
+            Principal: '*'
+      RouteTableIds:
+        - Fn::If:
+          - CreatePrivateSubnet1
+          - Ref: PrivateSubnet1RouteTable
+          - Ref: AWS::NoValue
+        - Fn::If:
+          - CreatePrivateSubnet2
+          - Ref: PrivateSubnet2RouteTable
+          - Ref: AWS::NoValue
+        - Fn::If:
+          - CreatePrivateSubnet3
+          - Ref: PrivateSubnet3RouteTable
+          - Ref: AWS::NoValue
+      ServiceName:
+        Fn::Join:
+          - ''
+          - - 'com.amazonaws.'
+            - Ref: AWS::Region
+            - '.s3'
+      VpcId:
+        Ref: Vpc
+  PublicSubnetRouteTable:
+      Condition: CreatePublicRouteTable
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId:
+          Ref: Vpc
+        Tags:
+          - Key: Name
+            Value:
+              Fn::Join:
+                - '-'
+                - - Ref: EnvironmentName
+                  - Ref: VpcName
+                  - 'public-routetable'
+  PublicNetworkAcl:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - '-'
+              - - Ref: EnvironmentName
+                - Ref: VpcName
+                - 'public-nacl'
+  PublicNetworkAclAllowAllInbound:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: '0.0.0.0/0'
+      Egress: false
+      NetworkAclId:
+        Ref: PublicNetworkAcl
+      Protocol: -1
+      RuleAction: allow
+      RuleNumber: 100
+  PublicNetworkAclAllowAllOutbound:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: '0.0.0.0/0'
+      Egress: true
+      NetworkAclId:
+        Ref: PublicNetworkAcl
+      Protocol: -1
+      RuleAction: allow
+      RuleNumber: 100
+  PublicSubnet1NetworkAclAssociation:
+    Condition: CreatePublicSubnet1
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnet1
+      NetworkAclId:
+        Ref: PublicNetworkAcl
+  PublicSubnet2NetworkAclAssociation:
+    Condition: CreatePublicSubnet2
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnet2
+      NetworkAclId:
+        Ref: PublicNetworkAcl
+  PublicSubnet3NetworkAclAssociation:
+    Condition: CreatePublicSubnet3
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId:
+        Ref: PublicSubnet3
+      NetworkAclId:
+        Ref: PublicNetworkAcl
+  PrivateNetworkAcl:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - '-'
+              - - Ref: EnvironmentName
+                - Ref: VpcName
+                - 'private-nacl'
+  PrivateNetworkAclAllowAllInbound:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: '0.0.0.0/0'
+      Egress: false
+      NetworkAclId:
+        Ref: PrivateNetworkAcl
+      Protocol: -1
+      RuleAction: allow
+      RuleNumber: 100
+  PrivateNetworkAclAllowAllOutbound:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: '0.0.0.0/0'
+      Egress: true
+      NetworkAclId:
+        Ref: PrivateNetworkAcl
+      Protocol: -1
+      RuleAction: allow
+      RuleNumber: 100
+  PrivateSubnet1NetworkAclAssociation:
+    Condition: CreatePrivateSubnet1
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId:
+        Ref: PrivateSubnet1
+      NetworkAclId:
+        Ref: PrivateNetworkAcl
+  PrivateSubnet2NetworkAclAssociation:
+    Condition: CreatePrivateSubnet2
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId:
+        Ref: PrivateSubnet2
+      NetworkAclId:
+        Ref: PrivateNetworkAcl
+  PrivateSubnet3NetworkAclAssociation:
+    Condition: CreatePrivateSubnet3
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId:
+        Ref: PrivateSubnet3
+      NetworkAclId:
+        Ref: PrivateNetworkAcl
+  PublicSubnetRouteTablePublicRoute:
+    Condition: CreatePublicRouteTable
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+      RouteTableId:
+        Ref: PublicSubnetRouteTable
+  PrivateSubnet1RouteTable:
+      Condition: CreatePrivateSubnet1
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId:
+          Ref: Vpc
+        Tags:
+          - Key: Name
+            Value:
+              Fn::Join:
+                - '-'
+                - - Ref: EnvironmentName
+                  - Ref: VpcName
+                  - 'private-routetable'
+  PrivateSubnet1RouteTablePrivateRouteNGW1:
+    Condition: CreatePrivateNGW1
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:
+        Ref: PrivateNGW1
+      RouteTableId:
+        Ref: PrivateSubnet1RouteTable
+  PrivateSubnet1RouteTablePublicRoute:
+    Condition: AssociatePrivateWithIGW1
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+      RouteTableId:
+        Ref: PrivateSubnet1RouteTable
+  PrivateNGWEIP1:
+    Condition: CreatePrivateNGW1
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  PrivateNGW1:
+    Condition: CreatePrivateNGW1
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+          - PrivateNGWEIP1
+          - AllocationId
+      SubnetId:
+        Ref: PublicSubnet1
+    DependsOn: InternetGatewayAttach
+  PublicSubnet1:
+    Condition: CreatePublicSubnet1
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+          - 0
+          - Fn::GetAZs:
+              Ref: AWS::Region
+      CidrBlock:
+        Ref: PublicSubnet1Cidr
+      MapPublicIpOnLaunch:
+        Ref: MapPublicSubnetsOnLaunch
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - '-'
+              - - Ref: EnvironmentName
+                - Ref: VpcName
+                - 'pub-01'
+                - Fn::Select:
+                  - 0
+                  - Fn::GetAZs:
+                      Ref: AWS::Region
+  PublicSubnet1RouteTableAssoc:
+    Condition: CreatePublicSubnet1
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: PublicSubnetRouteTable
+      SubnetId:
+        Ref: PublicSubnet1
+  PrivateSubnet1:
+    Condition: CreatePrivateSubnet1
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+          - 0
+          - Fn::GetAZs:
+              Ref: AWS::Region
+      CidrBlock:
+        Ref: PrivateSubnet1Cidr
+      MapPublicIpOnLaunch: false
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - '-'
+              - - Ref: EnvironmentName
+                - Ref: VpcName
+                - 'pri-01'
+                - Fn::Select:
+                  - 0
+                  - Fn::GetAZs:
+                      Ref: AWS::Region
+  PrivateSubnet1RouteTableAssoc:
+    Condition: CreatePrivateSubnet1
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: PrivateSubnet1RouteTable
+      SubnetId:
+        Ref: PrivateSubnet1
+  PrivateSubnet2RouteTable:
+      Condition: CreatePrivateSubnet2
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId:
+          Ref: Vpc
+        Tags:
+          - Key: Name
+            Value:
+              Fn::Join:
+                - '-'
+                - - Ref: EnvironmentName
+                  - Ref: VpcName
+                  - 'private-routetable'
+  PrivateSubnet2RouteTablePrivateRouteNGW2:
+    Condition: CreatePrivateNGW2
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:
+        Ref: PrivateNGW2
+      RouteTableId:
+        Ref: PrivateSubnet2RouteTable
+  PrivateSubnet2RouteTablePublicRoute:
+    Condition: AssociatePrivateWithIGW2
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+      RouteTableId:
+        Ref: PrivateSubnet2RouteTable
+  PrivateNGWEIP2:
+    Condition: CreatePrivateNGW2
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  PrivateNGW2:
+    Condition: CreatePrivateNGW2
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+          - PrivateNGWEIP2
+          - AllocationId
+      SubnetId:
+        Ref: PublicSubnet2
+    DependsOn: InternetGatewayAttach
+  PublicSubnet2:
+    Condition: CreatePublicSubnet2
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+          - 1
+          - Fn::GetAZs:
+              Ref: AWS::Region
+      CidrBlock:
+        Ref: PublicSubnet2Cidr
+      MapPublicIpOnLaunch:
+        Ref: MapPublicSubnetsOnLaunch
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - '-'
+              - - Ref: EnvironmentName
+                - Ref: VpcName
+                - 'pub-02'
+                - Fn::Select:
+                  - 1
+                  - Fn::GetAZs:
+                      Ref: AWS::Region
+  PublicSubnet2RouteTableAssoc:
+    Condition: CreatePublicSubnet2
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: PublicSubnetRouteTable
+      SubnetId:
+        Ref: PublicSubnet2
+  PrivateSubnet2:
+    Condition: CreatePrivateSubnet2
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+          - 1
+          - Fn::GetAZs:
+              Ref: AWS::Region
+      CidrBlock:
+        Ref: PrivateSubnet2Cidr
+      MapPublicIpOnLaunch: false
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - '-'
+              - - Ref: EnvironmentName
+                - Ref: VpcName
+                - 'pri-02'
+                - Fn::Select:
+                  - 1
+                  - Fn::GetAZs:
+                      Ref: AWS::Region
+  PrivateSubnet2RouteTableAssoc:
+    Condition: CreatePrivateSubnet2
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: PrivateSubnet2RouteTable
+      SubnetId:
+        Ref: PrivateSubnet2
+  PrivateSubnet3RouteTable:
+      Condition: CreatePrivateSubnet3
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId:
+          Ref: Vpc
+        Tags:
+          - Key: Name
+            Value:
+              Fn::Join:
+                - '-'
+                - - Ref: EnvironmentName
+                  - Ref: VpcName
+                  - 'private-routetable'
+  PrivateSubnet3RouteTablePrivateRouteNGW3:
+    Condition: CreatePrivateNGW3
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId:
+        Ref: PrivateNGW3
+      RouteTableId:
+        Ref: PrivateSubnet3RouteTable
+  PrivateSubnet3RouteTablePublicRoute:
+    Condition: AssociatePrivateWithIGW3
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+      RouteTableId:
+        Ref: PrivateSubnet3RouteTable
+  PrivateNGWEIP3:
+    Condition: CreatePrivateNGW3
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+  PrivateNGW3:
+    Condition: CreatePrivateNGW3
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+          - PrivateNGWEIP3
+          - AllocationId
+      SubnetId:
+        Ref: PublicSubnet3
+    DependsOn: InternetGatewayAttach
+  PublicSubnet3:
+    Condition: CreatePublicSubnet3
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+          - 2
+          - Fn::GetAZs:
+              Ref: AWS::Region
+      CidrBlock:
+        Ref: PublicSubnet3Cidr
+      MapPublicIpOnLaunch:
+        Ref: MapPublicSubnetsOnLaunch
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - '-'
+              - - Ref: EnvironmentName
+                - Ref: VpcName
+                - 'pub-03'
+                - Fn::Select:
+                  - 2
+                  - Fn::GetAZs:
+                      Ref: AWS::Region
+  PublicSubnet3RouteTableAssoc:
+    Condition: CreatePublicSubnet3
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: PublicSubnetRouteTable
+      SubnetId:
+        Ref: PublicSubnet3
+  PrivateSubnet3:
+    Condition: CreatePrivateSubnet3
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+          - 2
+          - Fn::GetAZs:
+              Ref: AWS::Region
+      CidrBlock:
+        Ref: PrivateSubnet3Cidr
+      MapPublicIpOnLaunch: false
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value:
+            Fn::Join:
+              - '-'
+              - - Ref: EnvironmentName
+                - Ref: VpcName
+                - 'pri-03'
+                - Fn::Select:
+                  - 2
+                  - Fn::GetAZs:
+                      Ref: AWS::Region
+  PrivateSubnet3RouteTableAssoc:
+    Condition: CreatePrivateSubnet3
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: PrivateSubnet3RouteTable
+      SubnetId:
+        Ref: PrivateSubnet3
+Outputs:
+  VpcId:
+    Value:
+      Ref: Vpc
+    Export:
+      Name:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - 'vpcId'
+  PublicSubnetIds1:
+    Condition: OnePublicSubnets
+    Value:
+      Ref: PublicSubnet3
+    Export:
+      Name:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - 'public-subnet-ids'
+  PublicSubnetIds2:
+    Condition: TwoPublicSubnets
+    Value:
+      Fn::Join:
+        - ','
+        - - Ref: PublicSubnet1
+          - Ref: PublicSubnet2
+    Export:
+      Name:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - 'public-subnet-ids'
+  PublicSubnetIds3:
+    Condition: ThreePublicSubnets
+    Value:
+      Fn::Join:
+        - ','
+        - - Ref: PublicSubnet1
+          - Ref: PublicSubnet2
+          - Ref: PublicSubnet3
+    Export:
+      Name:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - 'public-subnet-ids'
+  PrivateSubnetIds1:
+    Condition: OnePrivateSubnets
+    Value:
+      Ref: PrivateSubnet3
+    Export:
+      Name:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - 'private-subnet-ids'
+  PrivateSubnetIds2:
+    Condition: TwoPrivateSubnets
+    Value:
+      Fn::Join:
+        - ','
+        - - Ref: PrivateSubnet1
+          - Ref: PrivateSubnet2
+    Export:
+      Name:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - 'private-subnet-ids'
+  PrivateSubnetIds3:
+    Condition: ThreePrivateSubnets
+    Value:
+      Fn::Join:
+        - ','
+        - - Ref: PrivateSubnet1
+          - Ref: PrivateSubnet2
+          - Ref: PrivateSubnet3
+    Export:
+      Name:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - 'private-subnet-ids'
